@@ -1,4 +1,4 @@
-// sriensty --version=v2.0.0(十字扫线版本)
+// sriensty --version==1.0（稳定上车）
 #include "search.h"
 #include <iostream>
 #include "math.h"
@@ -109,8 +109,8 @@ static volatile Cfg g_cfg = {
     /* stick_latch_len  */ 24,
 
     /* k_win            */ 5,
-    /* k_delta_max      */ 0.15f,
-    /* ema_alpha        */ 0.45f
+    /* k_delta_max      */ 0.25f,
+    /* ema_alpha        */ 0.40f
 };
 
 // 导入斑马线参数
@@ -125,20 +125,6 @@ const int ZEBRA_MIN_WIDTH = 7;        // 最小条纹宽度
 const int ZEBRA_MAX_WIDTH = 15;       // 最大条纹宽度
 const int ZEBRA_CONFIRM_ROWS = 5;     // 需要连续确认的行数
 
-// 在其他常量定义附近添加
-static const int EXTEND_ROWS = 45;  // 延长的最大行数
-const int DETECT_BOTTOM_ROWS = 55;  // 只在底部60行内检测拐点
-
-// 拐点结构
-struct TurnPoint {
-    int x;  // 行号
-    int y;  // 列号
-};
-
-// 拐点变量
-TurnPoint TopLeft, TopRight;      // 左上、右上拐点
-TurnPoint BottomLeft, BottomRight; // 左下、右下拐点
-
 /* ---------- 帧内状态 ---------- */
 static int  s_stick_side  = 0;   // -1:左贴  0:无  +1:右贴
 static int  s_stick_latch = 0;   // 还剩几行强制按该侧处理
@@ -151,189 +137,8 @@ static bool s_locked_rows[MAX_VIDEO_LINE]; // 贴边段锁定
 static bool s_draw_row[MAX_VIDEO_LINE];// —— 行渲染开关：false 表示这一行“蓝线不再绘制/更新”
 static inline void clear_locked(){ for(int i=0;i<MAX_VIDEO_LINE;++i) s_locked_rows[i]=false; }
 static inline void clear_draw_mask(){ for(int i=0;i<MAX_VIDEO_LINE;++i) s_draw_row[i]=true; }
-#endif
 
-/* 边界延长处理 */
-/* 更新extend_boundaries函数的位置 */
-static void extend_boundaries() {
-    // 优先使用下拐点进行延长
-    if(BottomLeft.x > 0) { // 有左下拐点
-        // 计算拐点之前的边界斜率
-        float k = Slope_Calculate(0, BottomLeft.x, g_LeftEdge);
-        // 向上延长，但限制在20行以内
-        int extend_end = MIN(BottomLeft.x + EXTEND_ROWS, g_CenterNum);
-        for(int i = BottomLeft.x + 1; i < extend_end; i++) {
-            if(!s_locked_rows[i]) {
-                g_LeftEdge[i].y = g_LeftEdge[BottomLeft.x].y + 
-                                 k * (i - BottomLeft.x);
-                if(g_LeftEdge[i].y <= 0) break; // 触边停止
-            }
-        }
-    }
-    else if(TopLeft.x > 0) { // 有左上拐点
-        // 计算拐点之后的边界斜率
-        float k = Slope_Calculate(TopLeft.x, MIN(TopLeft.x + 10, g_CenterNum), g_LeftEdge);
-        // 向下延长，但限制在20行以内
-        int extend_start = MAX(TopLeft.x - EXTEND_ROWS, 0);
-        for(int i = TopLeft.x - 1; i >= extend_start; i--) {
-            if(!s_locked_rows[i]) {
-                g_LeftEdge[i].y = g_LeftEdge[TopLeft.x].y - 
-                                 k * (TopLeft.x - i);
-                if(g_LeftEdge[i].y <= 0) break;
-            }
-        }
-    }
-    
-    // 右侧边界延长（逻辑类似）
-    if(BottomRight.x > 0) {
-        float k = Slope_Calculate(0, BottomRight.x, g_RightEdge);
-        int extend_end = MIN(BottomRight.x + EXTEND_ROWS, g_CenterNum);
-        for(int i = BottomRight.x + 1; i < extend_end; i++) {
-            if(!s_locked_rows[i]) {
-                g_RightEdge[i].y = g_RightEdge[BottomRight.x].y + 
-                                  k * (i - BottomRight.x);
-                if(g_RightEdge[i].y >= MAX_VIDEO_POINT-1) break;
-            }
-        }
-    }
-    else if(TopRight.x > 0) {
-        float k = Slope_Calculate(TopRight.x, MIN(TopRight.x + 10, g_CenterNum), g_RightEdge);
-        int extend_start = MAX(TopRight.x - EXTEND_ROWS, 0);
-        for(int i = TopRight.x - 1; i >= extend_start; i--) {
-            if(!s_locked_rows[i]) {
-                g_RightEdge[i].y = g_RightEdge[TopRight.x].y - 
-                                  k * (TopRight.x - i);
-                if(g_RightEdge[i].y >= MAX_VIDEO_POINT-1) break;
-            }
-        }
-    }
 
-    // 延长完边界后重新计算这些行的中心线
-    for(int i = 0; i < g_CenterNum; i++) {
-        if(!s_locked_rows[i] && g_LeftEdge[i].y >= 0 && g_RightEdge[i].y < MAX_VIDEO_POINT) {
-            g_CenterPosition[i].x = i;
-            g_CenterPosition[i].y = (g_LeftEdge[i].y + g_RightEdge[i].y) / 2;
-        }
-    }
-}
-
-// 在extend_boundaries函数结尾添加
-static void verify_center_line() {
-    for(int i = 0; i < g_CenterNum; i++) {
-        if(!s_locked_rows[i]) {
-            // 确保中心线在左右边界之间
-            int ideal_center = (g_LeftEdge[i].y + g_RightEdge[i].y) / 2;
-            if(g_CenterPosition[i].y != ideal_center) {
-                g_CenterPosition[i].y = ideal_center;
-            }
-        }
-    }
-}
-
-/* 拐点检测和延长处理 */
-void detect_and_extend_turn_points() {
-    // 1. 重置拐点
-    TopLeft = TopRight = BottomLeft = BottomRight = {0, 0};
-    
-    const int SLOPE_CHANGE_THRESHOLD = 5;  // 斜率变化阈值
-    const int EDGE_MARGIN = 2;  // 边界容差
-
-    // 特殊场景下禁用拐点检测：停车库或十字路口
-    if (g_garage_state == 1 || g_garage_event > 0 || g_zebra_k == 1) {
-        return;
-    }
-    
-    // 2. 检测贴边情况
-    bool is_left_sticking = false;
-    bool is_right_sticking = false;
-    
-    // 检查底部几行是否贴边
-    for(int i = 0; i < 5 && i < g_LeftEdgeNum; i++) {
-        if(g_LeftEdge[i].y <= EDGE_MARGIN) is_left_sticking = true;
-        if(g_RightEdge[i].y >= MAX_VIDEO_POINT-1-EDGE_MARGIN) is_right_sticking = true;
-    }
-    
-    // 3. 分别处理左右边界拐点检测,限制在底部DETECT_BOTTOM_ROWS行内
-    // 左边界拐点检测
-    if(!is_left_sticking) {
-        int detect_end = MIN(DETECT_BOTTOM_ROWS, g_LeftEdgeNum - 5);
-        for(int i = 5; i < detect_end; i++) {
-            float k_before = Slope_Calculate(MAX(0, i-5), i, g_LeftEdge);
-            float k_after = Slope_Calculate(i, MIN(i+5, g_LeftEdgeNum), g_LeftEdge);
-            
-            if(abs(k_after - k_before) >= SLOPE_CHANGE_THRESHOLD) {
-                if(k_after > k_before) {  // 向上拐
-                    TopLeft.x = i;
-                    TopLeft.y = g_LeftEdge[i].y;
-                } else {  // 向下拐
-                    BottomLeft.x = i;
-                    BottomLeft.y = g_LeftEdge[i].y;
-                }
-                break;
-            }
-        }
-    }
-    
-    // 右边界拐点检测
-    if(!is_right_sticking) {
-        int detect_end = MIN(DETECT_BOTTOM_ROWS, g_RightEdgeNum - 5);
-        for(int i = 5; i < detect_end; i++) {
-            float k_before = Slope_Calculate(MAX(0, i-5), i, g_RightEdge);
-            float k_after = Slope_Calculate(i, MIN(i+5, g_RightEdgeNum), g_RightEdge);
-            
-            if(abs(k_after - k_before) >= SLOPE_CHANGE_THRESHOLD) {
-                if(k_after < k_before) {  // 向上拐
-                    TopRight.x = i;
-                    TopRight.y = g_RightEdge[i].y;
-                } else {  // 向下拐
-                    BottomRight.x = i;
-                    BottomRight.y = g_RightEdge[i].y;
-                }
-                break;
-            }
-        }
-    }
-    
-    // 4. 对贴边一侧，在底部范围内使用对侧的拐点信息辅助判断
-    if(is_left_sticking && (TopRight.x > 0 || BottomRight.x > 0)) {
-        int search_row = TopRight.x > 0 ? TopRight.x : BottomRight.x;
-        if(search_row < DETECT_BOTTOM_ROWS) {
-            for(int i = MAX(0, search_row-5); i < MIN(g_LeftEdgeNum, search_row+5); i++) {
-                if(g_LeftEdge[i].y <= EDGE_MARGIN) {
-                    if(TopRight.x > 0) {
-                        TopLeft.x = i;
-                        TopLeft.y = g_LeftEdge[i].y;
-                    } else {
-                        BottomLeft.x = i;
-                        BottomLeft.y = g_LeftEdge[i].y;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    
-    if(is_right_sticking && (TopLeft.x > 0 || BottomLeft.x > 0)) {
-        int search_row = TopLeft.x > 0 ? TopLeft.x : BottomLeft.x;
-        if(search_row < DETECT_BOTTOM_ROWS) {
-            for(int i = MAX(0, search_row-5); i < MIN(g_RightEdgeNum, search_row+5); i++) {
-                if(g_RightEdge[i].y >= MAX_VIDEO_POINT-1-EDGE_MARGIN) {
-                    if(TopLeft.x > 0) {
-                        TopRight.x = i;
-                        TopRight.y = g_RightEdge[i].y;
-                    } else {
-                        BottomRight.x = i;
-                        BottomRight.y = g_RightEdge[i].y;
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    
-    // 5. 边界延长
-    extend_boundaries();
-}
 static int first_border_hit_row(int tol=0){
     for(int i=0;i<g_CenterNum;++i){
         if (g_CenterPosition[i].y <= 0+tol) return i;
@@ -341,7 +146,7 @@ static int first_border_hit_row(int tol=0){
     }
     return -1;
 }
-
+#endif
 
 // 改进后的撞边检测和停止补线函数
 static void stop_after_border_hit() {
@@ -853,9 +658,6 @@ void PostCenterProcess() {
     clear_draw_mask();  // 设置所有行默认都可绘制
     clear_locked();     // 设置所有行默认都不锁定
 
-    // 1) 拐点检测和边界延长处理（在贴边检测之前）
-    detect_and_extend_turn_points(); 
-
     // 1) 贴边检测和补线
     int r_mid = -1;
     int side = detect_stick_bottom_strict(r_mid);
@@ -868,6 +670,7 @@ void PostCenterProcess() {
         // 立即检查是否撞边
         stop_after_border_hit();
     }
+
     // 2) 十字路口处理
     // 确保十字路口处理函数尊重锁定和不绘制标记
     crossroad_handle();
@@ -917,7 +720,7 @@ void PostCenterProcess() {
     //     }
 
     //     // 对竖直线不进行斜率限制和平滑处理
-        // return; // 可以直接返回，跳过后续处理
+    //     return; // 可以直接返回，跳过后续处理
     // }
 }
 // ===== 停车库竖直锁定结束 =====
@@ -1223,20 +1026,10 @@ else //有多个白块   需要取舍
 
         // —— 生成中心（改：用左右边缘数量的 min）——
         // 2) 初始中心线（左右中点），务必用两侧数量的最小值
-        // g_CenterNum = MIN(g_LeftEdgeNum, g_RightEdgeNum);
-        // for (int i = 0; i < g_CenterNum; ++i) {
-        //         g_CenterPosition[i].x = g_RightEdge[i].x;                          // 行号
-        //         g_CenterPosition[i].y = (g_LeftEdge[i].y + g_RightEdge[i].y) / 2;  // 列（中点）
-        // }
         g_CenterNum = MIN(g_LeftEdgeNum, g_RightEdgeNum);
         for (int i = 0; i < g_CenterNum; ++i) {
-            // 确保左右边界都有效
-            if (g_LeftEdge[i].y >= 0 && g_LeftEdge[i].y < MAX_VIDEO_POINT &&
-                g_RightEdge[i].y >= 0 && g_RightEdge[i].y < MAX_VIDEO_POINT) {
-                g_CenterPosition[i].x = i;  // 行号
-                // 严格取中点
-                g_CenterPosition[i].y = (g_LeftEdge[i].y + g_RightEdge[i].y) / 2;
-            }
+                g_CenterPosition[i].x = g_RightEdge[i].x;                          // 行号
+                g_CenterPosition[i].y = (g_LeftEdge[i].y + g_RightEdge[i].y) / 2;  // 列（中点）
         }
 
         // 3) 增强处理：贴边贝塞尔补线 + 十字延长 + 防突变限幅
@@ -1264,7 +1057,7 @@ for (int i = 0; i < g_CenterNum; ++i) {
         }
         
         //===================控制中心及电机控制====================//
-        //加权平均法求方向控制
+   /*   //加权平均法求方向控制
         g_DirectionControlWhole = 0;
         g_DirectionControlLine = 0;
         for (i = 0; i < g_CenterNum; i++)
@@ -1292,6 +1085,123 @@ for (int i = 0; i < g_CenterNum; ++i) {
         {
                 g_DirectionControl = g_FormerDirectionControl;
         }
+                */
+             
+        #define Y_PEAK 60              // 权重最大行
+        #define WEIGHT_MAX 1.0f        // 权重峰值
+        #define WEIGHT_MIN 0.3f        // 边缘最小权重，可调
+
+        // ------------------------
+        // 方向控制计算
+        // ------------------------
+        g_DirectionControlWhole = 0;
+        g_DirectionControlLine = 0;
+
+        for (int i = 0; i < g_CenterNum; i++)
+        {
+            int x = g_CenterPosition[i].x;
+            int y = g_CenterPosition[i].y;
+
+            if (y >= 0 && y <= MAX_VIDEO_LINE)
+            {
+
+                float dy = (float)(y - Y_PEAK);
+                float range = (float)Y_PEAK;
+                float w = 1.0f - (dy * dy) / (range * range); // 抛物线
+                if (w < 0) w = 0;
+                float weight = WEIGHT_MIN + w * (WEIGHT_MAX - WEIGHT_MIN);
+                // --------------------------------------
+
+                g_DirectionControlLine  += (int)(x * weight);
+                g_DirectionControlWhole += (int)(y * x * weight);
+            }
+        }
+
+        if (g_DirectionControlLine > 0)
+            g_DirectionControl = g_DirectionControlWhole / g_DirectionControlLine;
+
+        // 限制范围
+        if (g_DirectionControl < 0)
+            g_DirectionControl = 0;
+        else if (g_DirectionControl > MAX_VIDEO_POINT)
+            g_DirectionControl = MAX_VIDEO_POINT;
+
+        // 大跳变保护
+        if (ABS(g_DirectionControl - g_FormerDirectionControl) > 90)
+            g_DirectionControl = g_FormerDirectionControl;
+       /*                // 可调参数：试验时改这三个值
+        #define FAR_SCALE        0.6f   // 远端(高 y)权重乘子，0.0 ~ 1.0，越小远端影响越低
+        #define NEAR_SCALE       0.8f   // 近端(低 y)权重乘子，0.0 ~ 1.0，可防止近端抖动影响过大
+        #define MIN_WEIGHT       0.05f  // 权重下限，避免除零和完全忽略某些行
+
+        // 计算中点（基于行数 MAX_VIDEO_LINE）
+        int mid_line = 44;
+
+        // 使用浮点累加，最后再赋回全局（如果你全局用整数可 cast）
+        float acc_num = 0.0f;   // 分子累加 x * w
+        float acc_den = 0.0f;   // 权重之和
+
+        for (i = 0; i < g_CenterNum; i++)
+        {
+            int y = g_CenterPosition[i].y;
+            int x = g_CenterPosition[i].x;
+
+            // 只统计有效行（用 MAX_VIDEO_LINE 而不是 MAX_VIDEO_POINT）
+            if (y >= 0 && y < MAX_VIDEO_LINE)
+            {
+                // 标准化到 [-1, 1]（越接近0越靠中间）
+                float norm = 0.0f;
+                if (mid_line > 0)
+                    norm = (float)(y - mid_line) / (float)mid_line;  // -1 .. 1
+
+                // 二次倒 U 型权重（中间最大）
+                float w = 1.0f - norm * norm;   // 1 at mid, 0 at extremes
+
+                // 对远/近端进行额外缩放（如果你想让远处影响更小就把 FAR_SCALE 调小）
+                if (y > mid_line)
+                {
+                    // 远端（上半部分）做进一步衰减
+                    w *= FAR_SCALE;
+                }
+                else
+                {
+                    // 近端（下半部分）也略微衰减，防止地面噪点主导
+                    w *= NEAR_SCALE;
+                }
+
+                // 权重下限保护
+                if (w < MIN_WEIGHT) w = MIN_WEIGHT;
+
+                acc_num += (float)x * w;
+                acc_den += w;
+            }
+        }
+
+        // 计算结果并限制范围
+        if (acc_den > 0.0f)
+        {
+            float newDir = acc_num / acc_den;
+            // 限制到像素范围（你原来用 MAX_VIDEO_POINT 作为 x 最大）
+            if (newDir < 0.0f) newDir = 0.0f;
+            if (newDir > (float)MAX_VIDEO_POINT) newDir = (float)MAX_VIDEO_POINT;
+
+            // 平滑/限幅（把 90 改小，让反应更灵敏也不剧烈）
+            float max_delta = 90.0f; // 可调：每帧最大允许的改变（像素）
+            if (fabsf(newDir - (float)g_FormerDirectionControl) > max_delta)
+            {
+                if (newDir > (float)g_FormerDirectionControl)
+                    newDir = (float)g_FormerDirectionControl + max_delta;
+                else
+                    newDir = (float)g_FormerDirectionControl - max_delta;
+            }
+
+            g_DirectionControl = (int)(newDir + 0.5f);
+        }
+        else
+        {
+            // 没有有效权重时保持原值
+            g_DirectionControl = g_FormerDirectionControl;
+        }*/
 }
 
 /**
