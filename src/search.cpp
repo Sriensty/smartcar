@@ -13,9 +13,6 @@ using namespace std;
 #include <algorithm>
 #include <cmath>
 
-// #include "zaber_detector.cpp"
-
-
 int IMAGE_MIDDLE = 130;
 /********************************************变量声明***************************************************/
 uint8        g_VideoImageData[MAX_VIDEO_LINE][MAX_VIDEO_POINT];  //图像原始数据，g_VideoImageData[m][n]代表图像的从上数第m行，从左数第n点，0为最黑，255为最白
@@ -59,12 +56,6 @@ float Slope_Calculate(uint8 begin, uint8 end, _POINT* border); //最小二乘法
 #define ROUNDI(x)             ((int)((x) >= 0 ? ((x)+0.5f) : ((x)-0.5f)))
 
 // // 停车库参数
-// namespace zebra{
-// extern int g_garage_state;
-// extern int g_garage_event;
-// extern int g_garage_cool;
-// extern int g_garage_anchor_x;   // ← 新增：zaber_detector 里算的锚点
-// }
 int g_garage_state    = 0;
 int g_garage_event    = 0;
 int g_garage_cool     = 0;
@@ -113,18 +104,6 @@ static volatile Cfg g_cfg = {
     /* ema_alpha        */ 0.40f
 };
 
-// 导入斑马线参数
-extern bool   g_has_zebra;
-extern double g_zebra_k;
-
-const int ZEBRA_BOTTOM_ROWS = 60;     // 从底部向上检测的行数
-const int ZEBRA_START_ROW = 5;       // 从底部跳过的行数（避免最底部的噪声）
-const int ZEBRA_MIN_STRIPES = 8;      // 最少需要的黑条数量
-const int ZEBRA_WIDTH_TOL = 8;        // 条纹宽度容差(像素)
-const int ZEBRA_MIN_WIDTH = 7;        // 最小条纹宽度
-const int ZEBRA_MAX_WIDTH = 15;       // 最大条纹宽度
-const int ZEBRA_CONFIRM_ROWS = 5;     // 需要连续确认的行数
-
 /* ---------- 帧内状态 ---------- */
 static int  s_stick_side  = 0;   // -1:左贴  0:无  +1:右贴
 static int  s_stick_latch = 0;   // 还剩几行强制按该侧处理
@@ -163,15 +142,6 @@ static void stop_after_border_hit() {
             break;
         }
     }
-}
-
-
-
-
-static inline int bottom_center_y() {
-    if (g_LeftEdgeNum > 0 && g_RightEdgeNum > 0)
-        return (g_LeftEdge[0].y + g_RightEdge[0].y) / 2;
-    return MAX_VIDEO_POINT / 2;
 }
 
 static float lr_slope(int i0, int i1) {
@@ -569,86 +539,6 @@ static void slope_limiter() {
     }
 }
 
-// 存储斑马线状态
-struct ZebraDetector {
-    bool is_zebra_crossing = false;    // 是否检测到斑马线
-    int suspect_count = 0;             // 可疑行计数
-    int detected_row = -1;             // 检测到斑马线的行号
-    bool printed = false;              // 是否已经打印过检测信息
-};
-
-static ZebraDetector g_zebra;
-
-// 斑马线判断函数
-bool isZebraCrossing(int line) {
-    // 检查是否在检测范围内
-    if (line < ZEBRA_START_ROW || line >= ZEBRA_BOTTOM_ROWS) {
-        return false;
-    }
-
-    // 至少需要8个白块
-    if (g_SEnum < 7) return false;
-
-    // 统计连续相似宽度的白块
-    std::vector<int> widths;
-    for (int i = 0; i < g_SEnum; i++) {
-        widths.push_back(g_End[i] - g_Start[i]);
-    }
-
-    // 计算相邻宽度差
-    int similar_count = 0;
-    int max_similar_count = 0;
-    const int WIDTH_DIFF_TOL = 2; // 允许的宽度差异
-
-    for (int i = 0; i < widths.size() - 1; i++) {
-        if (abs(widths[i] - widths[i + 1]) <= WIDTH_DIFF_TOL) {
-            similar_count++;
-            if (similar_count > max_similar_count) {
-                max_similar_count = similar_count;
-            }
-        } else {
-            similar_count = 0;
-        }
-    }
-
-    // 要求至少有5个连续相似宽度的白块
-    // 并且这些白块的宽度在合理范围内（8-15像素）
-    if (max_similar_count >= 3) { // 连续5个相似的需要4个相似对
-        // 检查这些相似宽度的白块是否在合理范围内
-        int count_in_range = 0;
-        for (int width : widths) {
-            if (width >= 8 && width <= 15) {
-                count_in_range++;
-            }
-        }
-        
-        // 至少要有6个合理宽度的白块
-        return count_in_range >= 4;
-    }
-
-    return false;
-}
-
-void printZebraCrossing() {
-    if (g_zebra.is_zebra_crossing && !g_zebra.printed) {
-        std::cout << "\n==========================" << std::endl;
-        std::cout << "检测到斑马线!" << std::endl;
-        std::cout << "检测位置: 第 " << g_zebra.detected_row << " 行" << std::endl;
-        std::cout << "==========================" << std::endl;
-        g_zebra.printed = true;
-    }
-    else {
-        std::cout << "未检测到斑马线" << std::endl;
-        std::cout << "当前行白块数量: " << g_SEnum << std::endl;
-        if (g_SEnum > 0) {
-            std::cout << "白块宽度: ";
-            for (int i = 0; i < g_SEnum; i++) {
-                std::cout << (g_End[i] - g_Start[i]) << " ";
-            }
-            std::cout << std::endl;
-        }
-    }
-}
 
 /* ---------- 外部调用入口：在生成初始中心线后调用 ---------- */
 void PostCenterProcess() {
@@ -758,11 +648,6 @@ void PostCenterProcess() {
 /*********      search:处理数据即测试算法的函数 ********/
 void Search()
 {
-        // 重置斑马线检测状态
-        g_zebra.is_zebra_crossing = false;
-        g_zebra.suspect_count = 0;
-        g_zebra.detected_row = -1;
-        g_zebra.printed = false;
 
         g_LeftEdgeNum = 0; g_RightEdgeNum = 0;
         g_SearchFlag = 1;
@@ -990,25 +875,7 @@ else //有多个白块   需要取舍
     g_LeftEdge[g_LeftEdgeNum].x = line;
     g_LeftEdge[g_LeftEdgeNum++].y = g_Start[temp_mark];
     g_RightEdge[g_RightEdgeNum].x = line;
-    g_RightEdge[g_RightEdgeNum++].y = g_End[temp_mark];
-
-    // 在处理完白块后添加斑马线检测
-        if (line >= ZEBRA_START_ROW && line < ZEBRA_BOTTOM_ROWS) {
-            if (isZebraCrossing(line)) {
-                g_zebra.suspect_count++;
-                if (g_zebra.suspect_count >= ZEBRA_CONFIRM_ROWS) {
-                    g_zebra.is_zebra_crossing = true;
-                    if (g_zebra.detected_row == -1) {
-                        g_zebra.detected_row = line;
-                    }
-                }
-            } else {
-                g_zebra.suspect_count = 0;
-            }
-        }
-    
-    // 在Search()函数结束前打印检测结果
-    // printZebraCrossing();
+    g_RightEdge[g_RightEdgeNum++].y = g_End[temp_mark];   
         }
         }
 }
